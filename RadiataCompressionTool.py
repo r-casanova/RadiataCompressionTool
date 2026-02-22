@@ -1,0 +1,529 @@
+###--------------------------- PARAMETERS -----------------------###
+from typing import Dict, Any
+import os
+from pathlib import Path
+import argparse
+
+COMPRESSION_MODES: Dict[int, Dict[str, Any]] = {
+    0: {  # STORE / uncompressed
+        "name": "STORE",
+        "mode": 0,
+    },
+    1: {  # Standard LZSS
+        "name": "LZSS",
+        "mode": 1,
+        "window_size": 4096,
+        "literal_size": 1,
+        "flag_bits": 8,
+        "length_base": 3,
+        "min_match": 3,
+        "max_match": 18,
+        "rle_enabled": False,
+        "word_aligned": False,
+    },
+    2: {  # LZSS + RLE
+        "name": "LZSS+RLE",
+        "mode": 2,
+        "window_size": 4096,
+        "literal_size": 1,
+        "flag_bits": 8,
+        "length_base": 3,
+        "min_match": 3,
+        "max_match": 17,
+        "rle_enabled": True,
+        "rle_threshold": 0xF0,
+        "rle_short_min": 4,
+        "rle_short_max": 18,
+        "rle_long_min": 19,
+        "rle_long_max": 274,
+        "word_aligned": False,
+    },
+    3: {  # Word-aligned (LZSS16)
+        "name": "LZSS16",
+        "mode": 3,
+        "window_size": 8192,
+        "literal_size": 2,
+        "flag_bits": 16,
+        "length_base": 2,           # (code + 2) * 2
+        "min_match": 4,
+        "max_match": 34,            # (15 + 2) * 2 = 34
+        "rle_enabled": False,
+        "word_aligned": True,       # offsets & lengths must be even
+    }
+}
+
+MODE_DISPLAY = {
+    0: "0 - STORE (uncompressed)",
+    1: "1 - LZSS (standard)",
+    2: "2 - LZSS + RLE",
+    3: "3 - LZSS16 (word-aligned 16-bit)"
+    }
+
+###------------------------------ COMPRESS ----------------------------------###
+
+def start_compression(data_path: list[str], modes: list[int], output_path: list|str, chain: bool, log_func=None, progress_callback=None) -> None:
+    def log(msg):
+        if log_func:
+            log_func(msg)
+        else:
+            print(msg)
+    stats = []
+    total_raw_size = 0
+    total_comp_size = 0
+
+    compressed_blobs = []
+    for i, filepath in enumerate(data_path):
+        filename = os.path.basename(filepath)
+        raw_data = load_file(filepath)
+        raw_size = len(raw_data)
+        total_raw_size += raw_size
+        mode = modes[i]
+        log(f"\n=== Compressing {filename} (Mode {mode}) ===")
+
+        compressed = lzss_compress(raw_data, mode, filename=filepath, progress_callback=progress_callback)
+        
+        target_ext = output_path[0].lower() if chain else output_path[i].lower()
+        if target_ext.endswith('.sle'):
+            compressed = scramble_slz_payload(compressed)
+            
+        comp_size = len(compressed)
+        ratio = (comp_size / raw_size) * 100 if raw_size > 0 else 0
+        
+        stats.append({
+            "name": os.path.basename(filepath),
+            "raw": raw_size,
+            "compressed": comp_size,
+            "ratio": ratio,
+            "mode": COMPRESSION_MODES[mode]['name']
+        })
+        compressed_blobs.append(compressed)
+        if progress_callback:
+            progress_callback(100, f"✓ {filename} done → {comp_size:,} bytes ({ratio:.1f}%)")
+
+    if chain:  # Chained ouput
+        container = bytearray()
+        file_starts = []
+        for blob in compressed_blobs:
+            file_starts.append(len(container))
+            container.extend(blob)
+        for i, start_pos in enumerate(file_starts): # Update chain pointers
+            next_offset = (file_starts[i + 1] - start_pos) if i + 1 < len(file_starts) else 0
+            container[start_pos + 12 : start_pos + 16] = next_offset.to_bytes(4, 'little')
+        with open(output_path[0], 'wb') as f:
+            f.write(container)
+        total_comp_size = len(container)
+    else: # Individual ouput
+        for i, blob in enumerate(compressed_blobs):
+            with open(output_path[i], 'wb') as f:
+                f.write(blob)
+            total_comp_size += len(blob)
+
+    table = "\n" + "="*85 + "\n"
+    table += f"{'File Name':<25} | {'Mode':<10} | {'Original':<10} | {'Packed':<10} | {'Ratio':<8} | {'Sectors':<8}\n"
+    table += "-" * 85 + "\n"
+    for s in stats:
+        table += f"{s['name'][:25]:<25} | {s['mode']:<10} | {s['raw']:>10,} | {s['compressed']:>10,} | {s['ratio']:>6.2f}%  | {s['compressed'] / 0x1200:.2f}\n"
+    table += "-" * 85 + "\n"
+    total_ratio = (total_comp_size / total_raw_size) * 100 if total_raw_size > 0 else 0
+    savings = total_raw_size - total_comp_size
+    table += f"{'TOTAL':<25} | {'-':<10} | {total_raw_size:>10,} | {total_comp_size:>10,} | {total_ratio:>6.2f}%  | {total_comp_size / 0x1200:.2f}\n"
+    table += f"\nFinal Archive Size: {total_comp_size:,} bytes (0x{total_comp_size:X})\n"
+    table += f"Space Saved: {savings:,} bytes\n"
+    table += "="*85 + "\n"
+    log(table)
+
+def lzss_compress(data: bytes, mode: int, filename: str = "", progress_callback=None) -> bytes:
+    params = COMPRESSION_MODES.get(mode)
+    if not params:
+        raise ValueError(f'Invalid mode: {mode}')
+    
+    if params['name'] == 'STORE':
+        header = _encode_header(0, len(data), len(data))
+        return header + data
+        
+    compressed = bytearray()
+    i = 0
+    n = len(data)
+    token_buffer = bytearray()
+    flag_bits = 0
+    flag_count = 0
+
+    if params.get("word_aligned", False) and n % 2 != 0:
+        data += b'\x00'
+        n += 1
+
+    def show_progress(current, total):
+        percent = int((current / total) * 100)
+        bar_width = 40
+        filled = int(bar_width * current / total)
+        bar = '█' * filled + '─' * (bar_width - filled)
+        msg = f"Compressing {os.path.basename(filename)}: [{bar}] {percent:3d}% ({current:,}/{total:,} bytes)"
+        if progress_callback:
+            progress_callback(percent, msg)
+        else:
+            print(f"\r{msg}", end='', flush=True)
+    show_progress(0, n)   # show 0% at start
+
+    while i < n:
+        # deal with flags
+        if flag_count == params['flag_bits']:
+            _flush_flags(compressed, flag_bits, token_buffer, params)
+            flag_bits = 0
+            flag_count = 0
+            token_buffer.clear()
+
+        RLE_triggered = False
+
+        if params["rle_enabled"]:
+            run_length = 1
+            max_rle_check = min(n, i + params['rle_long_max'])
+            for j in range(i + 1, max_rle_check):
+                if data[j] == data[i]:
+                    run_length += 1
+                else:
+                    break
+
+            if run_length >= params['rle_short_min']:
+                RLE_triggered = True
+                flag_bits |= (0 << flag_count)
+                flag_count += 1
+
+                fill =  data[i]
+
+                if run_length <= params['rle_short_max']: # RLE short
+                    token_buffer.extend([fill, 0xF0 | (run_length - params['length_base'])])
+                else: # RLE long
+                    token_buffer.extend([(run_length - params['rle_long_min']), 0xF0, fill])                
+                i += run_length 
+
+        if not RLE_triggered : # LZSS
+            best_length = 0
+            best_offset = 0
+
+            max_length = min(params['max_match'], n - i)
+            if max_length >= params['min_match']: # start search
+                start_offset = 2 if params['word_aligned'] else 1
+                step = 2 if params['word_aligned'] else 1
+                max_offset = params['window_size'] - step
+                max_search = min(i, max_offset)
+                for offset in range(start_offset, max_search + 1, step):
+                    candidate = i - offset
+
+                    if data[candidate] != data[i]:
+                        continue
+                    
+                    match_length = 0
+                    while (match_length < max_length and i + match_length < n and
+                        data[candidate + match_length] == data[i + match_length]):
+                        match_length += 1
+
+                    if params['word_aligned']:
+                        match_length -= match_length % 2
+
+                    if match_length > best_length:
+                        best_length = match_length
+                        best_offset = offset
+                        if best_length == max_length:
+                            break
+            
+            if best_length >= params['min_match']:  # LZSS match
+                flag_bits |= (0 << flag_count)
+                flag_count += 1
+                token_buffer.extend(_encode_match(best_offset, best_length, params))
+                # Advance by the matched length
+                i += best_length
+
+            else: # Literal
+                flag_bits |= (1 << flag_count)
+                flag_count += 1
+                token_buffer.extend((data[i : i + params['literal_size']]))
+
+                i += params['literal_size']
+        show_progress(i, n)
+    # Flush remaining literals
+    if flag_count > 0:
+        _flush_flags(compressed, flag_bits, token_buffer, params)
+    header = _encode_header(params["mode"], len(compressed), len(data))
+    return bytes(header + compressed)
+
+
+def _flush_flags(compressed: bytearray, flag_bits: int, token_buffer: bytearray, params: Dict) -> None:
+    compressed.append(flag_bits & 0xFF)
+    if params['name'] == 'LZSS16':
+        compressed.append((flag_bits >> 8) &0xFF)
+    compressed.extend(token_buffer)
+
+
+def _encode_match(offset: int, length: int, params: dict) -> bytes:
+    if params['name'] == 'LZSS16':
+        length //= 2
+        offset //= 2
+
+    length_code = length - params['length_base']
+    offset_high = (offset >> 8) & 0x0F
+    offset_low = offset & 0xFF
+    byte1 = offset_low
+    byte2 = (length_code << 4) | offset_high
+    return bytes([byte1, byte2])
+
+
+def _encode_header(mode: int, compressed_payload_length: int, uncompressed_length: int,key_offset: int = 0) -> bytes:
+    header = bytearray()
+    header.extend(b'SLZ')
+    header.append(mode & 0xFF)
+    header.extend(compressed_payload_length.to_bytes(4, 'little'))
+    header.extend(uncompressed_length.to_bytes(4, 'little'))
+    header.extend(key_offset.to_bytes(4, 'little')) # always 0, chains get written in start_compression
+    return bytes(header)
+
+
+def scramble_slz_payload(data: bytes) -> bytes:
+    KEY = [ 0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
+            0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D ]
+    scrambled = bytearray()
+    mod_value = 0x03
+
+    for i, byte in enumerate(data[16:]):
+        key_value = KEY[i%16]
+        scrambled_byte = (byte ^ key_value) & 0xFF
+        modified_byte = (scrambled_byte + mod_value) & 0xFF
+        scrambled.append(modified_byte)
+        mod_value = (mod_value +0x03) & 0xFF
+    
+    return bytes(data[:2] + b'E' + data[3:16] + scrambled) # change header to sle
+
+###----------------------------- DECOMPRESS --------------------------------###
+
+def start_decompression(data_path: list, output_path: str, log_func=None) -> None:
+    def log(msg):
+        if log_func:
+            log_func(msg)
+        else:
+            print(msg)
+
+    if not os.path.isdir(output_path):
+        os.makedirs(output_path, exist_ok=True)
+
+    for path in data_path:
+        log(f"\n=== Decompressing {os.path.basename(path)} ===")
+        file = load_file(path)
+        if file[:3] not in [b'SLZ', b'SLE']: # verify file type
+            raise ValueError("Not an SLZ or SLE file")
+
+        chains = [0]
+        if int.from_bytes(file[12:16]) > 0:
+            index = 0
+            seen = set()
+            while index < len(file):
+                if index in seen: raise ValueError("Chain cycle")
+                seen.add(index)
+                next_off = int.from_bytes(file[index+12:index+16], 'little')
+                if next_off == 0:
+                    break
+                next_idx = index + next_off
+                if not (0 < next_idx < len(file)):
+                    raise ValueError("Invalid chain pointer")
+                chains.append(next_idx)
+                index = next_idx
+
+        decompressed_files = []
+        for start in chains:
+            compressed_len = int.from_bytes(file[start+4:start+8], 'little')
+            segment_end = start + 16 + compressed_len
+            if segment_end > len(file):
+                raise ValueError(f"Segment at 0x{start:x} overruns file")
+            segment = file[start:segment_end]
+            if segment[:3] == b'SLE': # convert SLE to SLZ
+                segment = unscramble_slz_payload(segment)
+            log(f'Index:[{hex(start)}:{hex(segment_end)}], Length:{hex(compressed_len)}, Mode:{segment[3]}, Sectors:{len(file)/0x1200:.2f}')
+            dec = lzss_decompress(segment, compressed_len)
+            decompressed_files.append(dec)
+    
+        base = Path(path).stem
+        save_base = os.path.join(output_path, base)
+        ext = '.raw'
+        save_files(decompressed_files, save_base, ext, log_func = log_func)
+
+
+
+def lzss_decompress(data: bytes, compressed_payload_length: int) -> bytes:
+    params = COMPRESSION_MODES[data[3]]   
+    if params['name'] == 'STORE': # STORE mode
+        return data[16:]
+    
+    pos = 16
+    decompressed = bytearray()
+    
+    flags = 0
+    bits_remaining = 0
+    def get_next_flag_bit() -> int:
+        nonlocal pos, flags, bits_remaining
+        if bits_remaining == 0: # fill flag LZSS8
+            if pos >= len(data):
+                raise EOFError("Ran out of data  while reading flags")
+            low = data[pos]
+            pos += 1
+            if params['name'] == 'LZSS16': # fill flag LZSS16
+                if pos >= len(data):
+                    raise EOFError("Ran out of data while reading flags")
+                high = data[pos]
+                pos += 1
+                flags = (high << 8) | low
+            else:
+                flags = low
+            bits_remaining = params['flag_bits']
+        # consume flags
+        bit = flags & 1
+        flags >>= 1
+        bits_remaining -= 1
+        return bit
+
+    current_flags = []
+    expected_size = int.from_bytes(data[8:12], 'little')    
+    # loop over compressed payload and stop when hit expected size (else 0s from flag will pad EOF)
+    while pos < compressed_payload_length + 16:        
+        is_literal = (get_next_flag_bit() == 1)
+        current_flags.append(1 if is_literal else 0)
+        if len(current_flags) == params['flag_bits']:
+            current_flags = []
+
+        if is_literal: # literal
+            decompressed.extend(data[pos:pos + params['literal_size']])
+            pos += params['literal_size']
+
+        else: # reference
+            if pos + 2 > len(data):
+                raise EOFError("Ran out of data for reference")
+            byte1 = data[pos]
+            byte2 = data[pos+1]
+            pos += 2
+            if params['rle_enabled'] and byte2 >= params['rle_threshold']: # RLE triggered
+                if byte2 > params['rle_threshold']: # short RLE
+                    length = (byte2 & 0xF) + params['length_base']
+                    fill = byte1
+                else: # long RLE
+                    length = byte1 + params['rle_long_min']
+                    if pos >= len(data):
+                        raise EOFError("Ran out of data for long RLE fill")
+                    fill = data[pos] # fill is byte 3
+                    pos += 1
+                decompressed.extend(bytes([fill]) * length) 
+            else: # LZSS triggered
+                length_code = (byte2 >> 4) & 0x0F
+                offset_low = byte1
+                offset_high = byte2 & 0x0F
+                offset = ((offset_high << 8) | offset_low )
+                length = length_code + params['length_base']
+                if params['name'] == 'LZSS16': # LZSS16
+                    offset *= 2
+                    length = length * 2
+                if offset == 0:
+                    decompressed.extend(bytes([0]) * length)
+                else:
+                    target = len(decompressed) - offset
+                    for k in range(length):
+                        if target + k < 0: # terminate on offset = 0
+                            break
+                        else:
+                            decompressed.append(decompressed[target + k ])
+        if len(decompressed) >= expected_size: # flush extra flags
+            decompressed = decompressed[:expected_size]
+            break
+
+    if len(decompressed) != int.from_bytes(data[8:12],'little'):
+        print(f"Size mismatch! Header uncompressed={hex(int.from_bytes(data[8:12],'little'))}, "
+              f"produced={hex(len(decompressed))}")        
+    return bytes(decompressed)
+
+
+def unscramble_slz_payload(data: bytes) -> bytes:
+    KEY = [
+        0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
+        0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D ]
+    unscrambled = bytearray()
+    mod_value = 0x03
+
+    for i, byte in enumerate(data[16:]):
+        key_value = KEY[i % 16]
+        modified_byte = (byte - mod_value) & 0xFF
+        unscrambled_byte = modified_byte ^ key_value
+        unscrambled.append(unscrambled_byte)
+        mod_value = (mod_value + 0x03) & 0xFF
+
+    return bytes(data[:2] + b'Z' + data[3:16] + unscrambled) # change header to slz
+
+###----------------------- Utility ----------------------------###
+
+def load_file(filename: str, min_size = 0x10, max_size = 0x1000000) -> bytes:
+    try:
+        with open(filename, 'rb') as f:
+            data = f.read()
+        file_size = len(data)
+        
+        # Check if file size is within acceptable limits
+        if not (min_size <= file_size <= max_size):
+            raise ValueError(f"File size {file_size} is out of bounds.")
+        
+        return data
+    except Exception as e:
+        print(f"Error loading file {filename}: {e}")
+        raise
+
+
+def save_files(files: list, basename: str, ext:str, log_func=None) -> None:
+    for i, item in enumerate(files, start=1):
+        if len(files)>1:
+            outname = f'{basename}{ext}{i}'
+        else:
+            outname = f'{basename}{ext}'
+        with open(outname, "wb") as f:
+            f.write(item)
+    msg = f"Saved {len(files)} file(s) → {basename}"
+    if log_func:
+        log_func(msg)
+    else:
+        print(msg)
+
+###------------------------- MAIN -----------------------------###
+
+if __name__ == "__main__":
+    # arg parsing setup
+    parser = argparse.ArgumentParser(description='Radiata Stories slz/sle Tool - CLI')
+    subparsers = parser.add_subparsers(dest='command', required=True)
+    
+    comp = subparsers.add_parser('compress')
+    comp.add_argument('inputs', nargs='+', metavar='INPUT', help='Input file(s)')
+    comp.add_argument('output', metavar='OUTPUT', help='Directory for output. Include file name if using --chain')
+    comp.add_argument('-m', '--mode', type=int, choices=[0,1,2,3], default=3, help='0=Store, 1=LZSS, 2=LZSS/RLE, 3=LZSS16')
+    comp.add_argument('--chain', action='store_true', help='For mulitple input files chained into one output file')
+    comp.add_argument('--sle', action='store_true', help='Compress and encrypt')
+
+    decomp = subparsers.add_parser('decompress')
+    decomp.add_argument('inputs', nargs='+', metavar='INPUT', help='Input file')
+    decomp.add_argument('output', metavar='OUTPUT', help='Directory for output')
+
+    args = parser.parse_args()
+    # arg parsing execution
+    if args.command == 'compress':
+        if not args.chain and len(args.inputs) != 1:
+            parser.error('Compression only supports 1 input file at a time. Use --chain for chained archives.')
+    
+        modes = [args.mode] * len(args.inputs)
+        
+        if args.chain:
+            output_paths = [args.output]
+        else:
+            ext = ".sle" if args.sle else ".slz"
+            out = Path(args.output)
+
+            if not out.suffix:
+                out = out / (Path(args.inputs[0]).stem + ext)
+            output_paths = [str(out)]
+        
+        print(f'Starting compression mode:{args.mode}')
+        start_compression(args.inputs, modes, output_paths, args.chain)
+    elif args.command == 'decompress':
+        print('Starting decompression')
+        start_decompression(args.inputs, args.output)
+
+    print('\nDone')
