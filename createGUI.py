@@ -16,6 +16,7 @@ def launch_gui():
     root = tk.Tk()
     root.title("RADIATA STORIES - SLZ/SLE Compression Tool")
     root.geometry("980x740")
+    root.minsize(860, 620)
     root.configure(bg="#C0C0C0")
     root.resizable(True, True)
 
@@ -39,19 +40,56 @@ def launch_gui():
         header = tk.Label(parent, text=text, font=("Courier New", 14, "bold"),
                           bg="#000080", fg="#FFFFFF", relief="raised", bd=3, pady=8)
         header.pack(fill="x", pady=(0, 10))
+    
+    # ====================== RETRO STATS POPUP ======================
+    def show_completion_dialog(title: str, content: str):
+        dialog = tk.Toplevel(root)
+        dialog.title(title)
+        dialog.geometry("860x520")
+        dialog.configure(bg="#C0C0C0")
+        dialog.resizable(False, False)
+        dialog.transient(root)          # stay on top of main window
+        dialog.grab_set()               # modal
 
+        # Retro header
+        tk.Label(dialog, text=title, font=("Courier New", 14, "bold"),
+                 bg="#000080", fg="#FFFFFF", relief="raised", bd=3, pady=8).pack(fill="x")
+
+        # Scrollable stats
+        frame = tk.Frame(dialog, bg="#C0C0C0")
+        frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        text = tk.Text(frame, bg="#001100", fg="#00FF80", font=("Courier New", 10),
+                       relief="sunken", bd=3, wrap="none")
+        text.pack(side="left", fill="both", expand=True)
+
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=text.yview)
+        scroll.pack(side="right", fill="y")
+        text.config(yscrollcommand=scroll.set)
+
+        text.insert("1.0", content)
+        text.config(state="disabled")   # read-only
+
+        # OK button
+        tk.Button(dialog, text="OK", command=dialog.destroy, relief="raised", bd=3,
+                  bg="#C0C0C0", activebackground="#A0A0A0", font=("Courier New", 10, "bold"),
+                  width=12, height=1).pack(pady=12)
+        
     # ====================== COMPRESS TAB ======================
     compress_tab = ttk.Frame(notebook)
     notebook.add(compress_tab, text=" COMPRESS ")
 
     create_retro_header(compress_tab, "   RADIATA COMPRESSION TOOL v1.0   ")
 
-    ttk.Label(compress_tab, text="Input Raw Files:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(5, 2))
+    top_content = tk.Frame(compress_tab, bg="#C0C0C0")
+    top_content.pack(fill="both", expand=True)
 
-    files_frame = ttk.Frame(compress_tab)
+    ttk.Label(top_content, text="Input Raw Files:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(5, 2))
+
+    files_frame = ttk.Frame(top_content)
     files_frame.pack(fill="both", expand=True, padx=12, pady=2)
 
-    input_listbox = tk.Listbox(files_frame, selectmode="extended", height=9,
+    input_listbox = tk.Listbox(files_frame, selectmode="extended", height=6,   # ← reduced from 8
                                bg="#FFFFFF", fg="#000000", font=("Courier New", 10), relief="sunken", bd=3)
     input_listbox.pack(side="left", fill="both", expand=True)
 
@@ -59,7 +97,7 @@ def launch_gui():
     scrollbar.pack(side="right", fill="y")
     input_listbox.config(yscrollcommand=scrollbar.set)
 
-    btn_frame = tk.Frame(compress_tab, bg="#C0C0C0")
+    btn_frame = tk.Frame(top_content, bg="#C0C0C0")
     btn_frame.pack(fill="x", padx=12, pady=6)
 
     def add_input_files():
@@ -79,25 +117,23 @@ def launch_gui():
     tk.Button(btn_frame, text="Clear All", command=lambda: input_listbox.delete(0, "end"), relief="raised", bd=3,
               bg="#C0C0C0", activebackground="#A0A0A0", font=("Courier New", 10)).pack(side="left", padx=4)
 
-    ttk.Label(compress_tab, text="Compression Mode (for all files):", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(12, 2))
+    ttk.Label(top_content, text="Compression Mode (for all files):", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(10, 2))
     mode_var = tk.StringVar(value=MODE_DISPLAY[3])
-    mode_combo = ttk.Combobox(compress_tab, textvariable=mode_var, values=list(MODE_DISPLAY.values()),
+    mode_combo = ttk.Combobox(top_content, textvariable=mode_var, values=list(MODE_DISPLAY.values()),
                               state="readonly", font=("Courier New", 10), width=50)
     mode_combo.pack(fill="x", padx=12)
 
-    # ──────── SINGLE CHAIN TOGGLE (default = individual files) ────────
-    ttk.Label(compress_tab, text="Output Options:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(15, 5))
+    ttk.Label(top_content, text="Output Options:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(12, 5))
 
-    chain_var = tk.BooleanVar(value=False)   # False = individual (default)
-
-    tk.Checkbutton(compress_tab, text="Chained archive",
-                   variable=chain_var, bg="#C0C0C0", font=("Courier New", 10), anchor="w").pack(anchor="w", padx=20, pady=4)
+    chain_var = tk.BooleanVar(value=False)
+    tk.Checkbutton(top_content, text="Chained archive", variable=chain_var,
+                   bg="#C0C0C0", font=("Courier New", 10)).pack(anchor="w", padx=20, pady=3)
 
     sle_var = tk.BooleanVar(value=False)
-    tk.Checkbutton(compress_tab, text="Encrypt as .SLE",
-                   variable=sle_var, bg="#C0C0C0", font=("Courier New", 10), anchor="w").pack(anchor="w", padx=20, pady=2)
+    tk.Checkbutton(top_content, text="Encrypt as .SLE", variable=sle_var,
+                   bg="#C0C0C0", font=("Courier New", 10)).pack(anchor="w", padx=20, pady=3)
 
-    output_frame = tk.Frame(compress_tab, bg="#C0C0C0")
+    output_frame = tk.Frame(top_content, bg="#C0C0C0")
     output_frame.pack(fill="x", padx=12, pady=8)
 
     output_path_var = tk.StringVar()
@@ -105,42 +141,28 @@ def launch_gui():
     tk.Entry(output_frame, textvariable=output_path_var, font=("Courier New", 10), width=65, relief="sunken", bd=3).pack(side="left", padx=8, fill="x", expand=True)
 
     def browse_output():
-        if chain_var.get():   # chained
+        if chain_var.get():
             ext = ".sle" if sle_var.get() else ".slz"
-            f = filedialog.asksaveasfilename(
-                title="Save Chained Archive",
-                defaultextension=ext,
-                filetypes=[("SLZ/SLE Archive", "*.slz *.sle"), ("All Files", "*.*")]
-            )
+            f = filedialog.asksaveasfilename(title="Save Chained Archive", defaultextension=ext,
+                                             filetypes=[("SLZ/SLE Archive", "*.slz *.sle"), ("All Files", "*.*")])
             if f: output_path_var.set(f)
-        else:                 # individual → folder
+        else:
             d = filedialog.askdirectory(title="Select Output Folder")
             if d: output_path_var.set(d)
 
     tk.Button(output_frame, text="Browse...", command=browse_output, relief="raised", bd=3,
               bg="#C0C0C0", activebackground="#A0A0A0", font=("Courier New", 10)).pack(side="left", padx=5)
 
-    # ──────── LIVE PROGRESS + CONSOLE ────────
-    ttk.Label(compress_tab, text="Live Progress:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(10,2))
-    
+    # Live Progress
+    ttk.Label(top_content, text="Live Progress:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(8,2))
     current_status = tk.StringVar(value="Idle - Ready to compress")
-    tk.Label(compress_tab, textvariable=current_status, font=("Courier New", 10), bg="#C0C0C0", fg="#006400", relief="sunken", bd=2, anchor="w", padx=8).pack(fill="x", padx=12, pady=2)
+    tk.Label(top_content, textvariable=current_status, font=("Courier New", 10), bg="#C0C0C0", fg="#006400",
+             relief="sunken", bd=2, anchor="w", padx=8).pack(fill="x", padx=12, pady=2)
     
-    progress_bar = ttk.Progressbar(compress_tab, length=720, mode='determinate')
+    progress_bar = ttk.Progressbar(top_content, length=720, mode='determinate')
     progress_bar.pack(fill="x", padx=12, pady=4)
 
-    ttk.Label(compress_tab, text="Console Output / Stats:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(8,2))
-    
-    console_frame = ttk.Frame(compress_tab)
-    console_frame.pack(fill="both", expand=True, padx=12, pady=2)
-    
-    console = tk.Text(console_frame, height=14, bg="#001100", fg="#00FF80", font=("Courier New", 9), relief="sunken", bd=3)
-    console.pack(side="left", fill="both", expand=True)
-    console_scroll = ttk.Scrollbar(console_frame, orient="vertical", command=console.yview)
-    console_scroll.pack(side="right", fill="y")
-    console.config(yscrollcommand=console_scroll.set)
-
-    # ──────── RUN COMPRESSION (uses chain_var only) ────────
+    # ====================== RUN COMPRESSION ======================
     def run_compression():
         files = list(input_listbox.get(0, "end"))
         if not files:
@@ -159,7 +181,7 @@ def launch_gui():
             return
 
         modes = [mode] * len(files)
-        chain = chain_var.get()          # ←←← ONLY this line now
+        chain = chain_var.get()
 
         if chain:
             output_paths = [out_path]
@@ -167,34 +189,42 @@ def launch_gui():
             ext = ".sle" if sle_var.get() else ".slz"
             output_paths = [os.path.join(out_path, Path(f).stem + ext) for f in files]
 
-        # Reset UI
-        console.delete("1.0", "end")
         progress_bar.configure(value=0)
         current_status.set("Starting compression...")
 
+        log_lines = []
+
         def gui_log(text):
-            root.after(0, lambda t=text: [console.insert("end", t + "\n"), console.see("end")])
+            log_lines.append(text)
+            print(text)
 
         def gui_progress(percent, msg):
             root.after(0, lambda: progress_bar.configure(value=percent))
-            root.after(0, lambda m=msg: current_status.set(m[:90]))
+            root.after(0, lambda: current_status.set(msg[:85]))
 
         def thread_target():
             try:
-                start_compression(files, modes, output_paths, chain, log_func=gui_log, progress_callback=gui_progress)
-                root.after(0, lambda: messagebox.showinfo("Success", "Compression complete!\nCheck the console below for full stats."))
+                start_compression(files, modes, output_paths, chain,
+                                  log_func=gui_log, progress_callback=gui_progress)
+                full_log = "\n".join(log_lines)
+                root.after(0, lambda: show_completion_dialog("COMPRESSION COMPLETE", full_log))
                 root.after(0, lambda: current_status.set("✓ All done!"))
             except Exception as e:
-                root.after(0, lambda err=str(e): [messagebox.showerror("Error", err), current_status.set("ERROR: " + err[:60])])
+                err = str(e)
+                root.after(0, lambda: messagebox.showerror("Error", err))
+                root.after(0, lambda: current_status.set("ERROR: " + err[:60]))
 
         threading.Thread(target=thread_target, daemon=True).start()
-        messagebox.showinfo("Running", "Compression started!\nWatch the progress bar and console.")
+        messagebox.showinfo("Running", "Compression started!\nWatch the progress bar.")
 
-    # tk.Button(compress_tab, text="START COMPRESSION", command=run_compression, relief="raised", bd=5,
-    #           bg="#C0C0C0", activebackground="#00FF00", font=("Courier New", 12, "bold"), height=2).pack(pady=12)
-    tk.Button(compress_tab, text="START COMPRESSION", command=run_compression, relief="raised", bd=5,
-            bg="#C0C0C0", activebackground="#00FF00", font=("Courier New", 12, "bold"), height=2).pack(pady=18)
+    # Big button always at bottom
+    button_frame = tk.Frame(compress_tab, bg="#C0C0C0")
+    button_frame.pack(side="bottom", fill="x", padx=12, pady=12)
 
+    tk.Button(button_frame, text="START COMPRESSION", command=run_compression,
+              relief="raised", bd=5, bg="#C0C0C0", activebackground="#000080",
+              font=("Courier New", 12, "bold"), height=2).pack(fill="x")
+        
     # ====================== DECOMPRESS TAB ======================
     decompress_tab = ttk.Frame(notebook)
     notebook.add(decompress_tab, text=" DECOMPRESS ")
