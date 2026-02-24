@@ -2,8 +2,6 @@
 ### Overview
 A modding tool for radiata stories that can compress/decompress all slz/sle file. 
 
-Not currently built for speed, built to be close to the original game's compressor.
-
 Achieves compression/decompression through header parsing, meaning files that have embedded or nonchained compressed files will need to be split to their own file before this tool can parse them.
 
 ### Usage
@@ -24,14 +22,12 @@ Compressor has four mode. Advanced specs can be found near the top of RadiataCom
 -3 LZSS16: LZSS with 16bit flags and 2byte literals.
 
 
-Compressor generates a similar offset histogram to the original. In my testing this compressor compresses files slightly more than the original. Uses a greedy search algorithm.
+Compressor generates a similar offset histogram to the original.
 
 Decompression/Encryption generates bit identical outputs compared to original.
 
 ### Notable areas of improvement
-Speed of compression, currently $O(n)^2$
-
-I have not researched runtime decompression speeds.
+Research into runtime decompression.
 
 Embedded/Nonchained headers could be parsed for before decompression.
 
