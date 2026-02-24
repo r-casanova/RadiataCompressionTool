@@ -204,7 +204,8 @@ def lzss_compress(data: bytes, mode: int, filename: str = "", progress_callback=
         
     compressed = bytearray()
     i = 0
-    n = len(data)
+    original_size = len(data)
+    n = original_size
     token_buffer = bytearray()
     flag_bits = 0
     flag_count = 0
@@ -288,7 +289,17 @@ def lzss_compress(data: bytes, mode: int, filename: str = "", progress_callback=
     # Flush remaining literals
     if flag_count > 0:
         _flush_flags(compressed, flag_bits, token_buffer, params)
-    header = _encode_header(params["mode"], len(compressed), len(data))
+
+    # Emit end-of-stream sentinel (offset==0 back-reference).
+    # Without this, recompressed data will overrun when loaded in-game.
+    sentinel_flag = bytearray()
+    sentinel_flag.append(0x00)  # flag byte: all bits clear
+    if params['name'] == 'LZSS16':
+        sentinel_flag.append(0x00)  # 16-bit flag word
+    sentinel_flag.extend(b'\x00\x00')  # offset=0, length=0 back-reference
+    compressed.extend(sentinel_flag)
+
+    header = _encode_header(params["mode"], len(compressed), original_size)
     return bytes(header + compressed)
 
 
@@ -500,7 +511,7 @@ def lzss_decompress(data: bytes, compressed_payload_length: int) -> bytes:
                     offset *= 2
                     length = length * 2
                 if offset == 0:
-                    decompressed.extend(bytes([0]) * length)
+                    break  # offset==0 is end-of-stream sentinel
                 else:
                     target = len(decompressed) - offset
                     for k in range(length):
@@ -512,9 +523,10 @@ def lzss_decompress(data: bytes, compressed_payload_length: int) -> bytes:
             decompressed = decompressed[:expected_size]
             break
 
-    if len(decompressed) != int.from_bytes(data[8:12],'little'):
-        print(f"Size mismatch! Header uncompressed={hex(int.from_bytes(data[8:12],'little'))}, "
-              f"produced={hex(len(decompressed))}")        
+    decompressed = decompressed[:expected_size]
+    if len(decompressed) != expected_size:
+        print(f"Size mismatch! Header uncompressed={hex(expected_size)}, "
+              f"produced={hex(len(decompressed))}")
     return bytes(decompressed)
 
 
@@ -522,17 +534,19 @@ def unscramble_slz_payload(data: bytes) -> bytes:
     KEY = [
         0x66, 0x66, 0x54, 0x42, 0xB3, 0x79, 0xF0, 0xC7, 
         0xE7, 0xD5, 0x1E, 0x4B, 0x7B, 0xA4, 0x1C, 0x7D ]
+    comp_size = int.from_bytes(data[4:8], 'little')
+    payload = data[16:]
     unscrambled = bytearray()
     mod_value = 0x03
 
-    for i, byte in enumerate(data[16:]):
+    for i in range(min(comp_size, len(payload))):
         key_value = KEY[i % 16]
-        modified_byte = (byte - mod_value) & 0xFF
+        modified_byte = (payload[i] - mod_value) & 0xFF
         unscrambled_byte = modified_byte ^ key_value
         unscrambled.append(unscrambled_byte)
         mod_value = (mod_value + 0x03) & 0xFF
 
-    return bytes(data[:2] + b'Z' + data[3:16] + unscrambled) # change header to slz
+    return bytes(data[:2] + b'Z' + data[3:16] + unscrambled) # change header to SLZ
 
 ###----------------------- Utility ----------------------------###
 
