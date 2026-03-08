@@ -174,7 +174,7 @@ def pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: li
             expected = params["num_offsets"] * params["alignment"]
             to_write = extended_raw[:expected] + b"\x00" * (expected - len(extended_raw))
             f.write(to_write[:expected])
-            print(f"  ✓ Preserved extended table from original ({expected} bytes)")
+            print(f"Preserved extended table from original ({expected} bytes)")
     
         # TODO External payload output
 
@@ -184,7 +184,7 @@ def pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: li
         
         if raw_tail:
             f.write(raw_tail)
-            print(f"  ✓ Appended tail after data ({len(raw_tail)} bytes)")
+            print(f"Appended tail after data ({len(raw_tail)} bytes)")
 
         sector_size = 0x800
         sector_padding = (sector_size - (f.tell() % sector_size)) % sector_size
