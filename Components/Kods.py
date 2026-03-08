@@ -132,7 +132,7 @@ def calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple
     pos = params['padding']
     shifted_offsets = []
     final_data_blobs = []
-    hash_map = {} # content_hash -> shifted_offset
+    hash_map = {}
 
     for block in data_blocks:
         if not block: # Handle NULL entries
@@ -140,16 +140,13 @@ def calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple
             continue
             
         block_hash = hash(block)
-        if block_hash in hash_map:
-            # ALIAS: Point this index to existing data
+        if block_hash in hash_map: 
             shifted_offsets.append(hash_map[block_hash])
-        else:
-            # NEW DATA: Align and append
+        else: # new entry
             shifted_offsets.append(pos >> params['shift'])
             hash_map[block_hash] = pos >> params['shift']
             final_data_blobs.append(block)
             
-            # Align next start pos to denominator
             pos += len(block)
             padding = (params['denominator'] - (pos % params['denominator'])) % params['denominator']
             pos += padding
@@ -157,7 +154,6 @@ def calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple
             # Add padding to the block itself to keep the file pointer math simple
             final_data_blobs[-1] += (b'\x00' * padding)
 
-    # Final EOF offset (always points to end of last block)
     shifted_offsets.append(pos >> params['shift'])
     return shifted_offsets, final_data_blobs
 
