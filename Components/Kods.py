@@ -18,28 +18,28 @@ def start_kods_packing(input_dir: Path, output_path: Path, original_kods: Path) 
     if not raw_original[:4] == b'Kods':
         raise ValueError('Original file is missing kods header')
     # Determine original parameters
-    params = parse_header(raw_original)
+    params = _parse_header(raw_original)
     original_length = len(raw_original)
-
+    # Extended table based on original to keep metadata and files contiguous
     extended_raw: Optional[bytes] = None
     if params['extended_table']:
         ext_start = params["table_base"] + params['num_offsets'] * params["alignment"]
         ext_size = params['num_offsets'] * params["alignment"]
         extended_raw = raw_original[ext_start : ext_start + ext_size]
         print(f"Template from original: {params['num_offsets']} slots + extended table ({ext_size} bytes)")
+    # Information needed for a successful packing
+    data_blocks = _prepare_data_blocks(input_dir, params['num_offsets'] - 1)
+    raw_tail = _load_tail(input_dir)
+    best_params = _analyze_kods_outcomes(data_blocks, params)
+    kods_header = _create_kods_header(best_params)
+    offsets, final_blocks = _calculate_offsets(data_blocks, best_params)
+    # The packing and reporting
+    packed_length = _pack_kods(output_path, kods_header, best_params, final_blocks, offsets, extended_raw, raw_tail)
+    _report_sectors(original_length, packed_length)
 
-    data_blocks = prepare_data_blocks(input_dir, params['num_offsets'] - 1)
-    raw_tail = load_tail(input_dir)
-    best_params = analyze_kods_outcomes(data_blocks, params)
-    kods_header = create_kods_header(best_params)
-    offsets, final_blocks = calculate_offsets(data_blocks, best_params)
 
-    packed_length = pack_kods(output_path, kods_header, best_params, final_blocks, offsets, extended_raw, raw_tail)
-
-    report_sectors(original_length, packed_length)
-
-
-def prepare_data_blocks(input_dir: Path, num_entries: int) -> list:
+def _prepare_data_blocks(input_dir: Path, num_entries: int) -> list:
+    # Gather bins for rebuild into an organised list
     file_map: dict[int, bytes] = {}
     pattern = re.compile(r'_([0-9A-Fa-f]{4})\.bin$', re.IGNORECASE)
     for p in input_dir.glob("*.bin"):
@@ -52,7 +52,8 @@ def prepare_data_blocks(input_dir: Path, num_entries: int) -> list:
     return [file_map.get(i, b'') for i in range(num_entries)]
 
 
-def load_tail(input_dir: Path):
+def _load_tail(input_dir: Path):
+    # Check for XXXX_tail.bin file
     tail_file = list(input_dir.glob('*_tail.bin'))
     if tail_file:
         tail = tail_file[0].read_bytes()
@@ -61,7 +62,7 @@ def load_tail(input_dir: Path):
     return None
 
 
-def analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str,Any]:
+def _analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str,Any]:
     # Get data
     unique_blocks = {}
     total_unique_size = 0
@@ -69,7 +70,7 @@ def analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str,
         if block and block not in unique_blocks:
             unique_blocks[block] = True
             total_unique_size += len(block)    
-
+    # Generate new params based on certain original params to avoid corruption
     num_entries = len(data_blocks) + 1
     entry_type = original_params['entry_type']
     alignment = 2 if entry_type else 4
@@ -116,7 +117,7 @@ def analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str,
     return best_parameters
 
 
-def create_kods_header(params: dict) -> int:
+def _create_kods_header(params: dict) -> int:
     kods_header = (
             (params['num_offsets'] & 0xFFFF) | 
             ((params['shift'] & 0xF) << 16) | 
@@ -128,7 +129,7 @@ def create_kods_header(params: dict) -> int:
     return kods_header
 
 
-def calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple[list[int], list[bytes]]:
+def _calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple[list[int], list[bytes]]:
     pos = params['padding']
     shifted_offsets = []
     final_data_blobs = []
@@ -158,10 +159,10 @@ def calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple
     return shifted_offsets, final_data_blobs
 
 
-def pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: list[bytes], offsets: list[int], extended_raw: Optional[bytes], raw_tail: Optional[bytes]) -> int:
+def _pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: list[bytes], offsets: list[int], extended_raw: Optional[bytes], raw_tail: Optional[bytes]) -> int:
     out_file = output_path / 'repack.bin'
     with open(out_file, 'wb') as f:
-        f.write(b'Kods')
+        f.write(b'Kods') # write header
         f.write(struct.pack('<I', kods_header))
         for offset in offsets: # write standard table
             f.write(struct.pack(params['format'], offset))
@@ -178,13 +179,13 @@ def pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: li
         for block in data_blocks:
             f.write(block)
         
-        if raw_tail:
+        if raw_tail: # Append tail after Kods archive
             f.write(raw_tail)
             print(f"Appended tail after data ({len(raw_tail)} bytes)")
 
         sector_size = 0x800
         sector_padding = (sector_size - (f.tell() % sector_size)) % sector_size
-        if sector_padding:
+        if sector_padding: # Pad to sector size
             f.write(b'\x00' * sector_padding)
 
     print(f'Repacked .kods to {output_path}.\nStatistics; Number of offsets:{params["num_offsets"]} Entry type:{params["entry_type"]}')
@@ -193,13 +194,13 @@ def pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: li
         return len(f.read())
 
 
-def report_sectors(original_length: int, packed_length: int) -> None:
+def _report_sectors(original_length: int, packed_length: int) -> None:
     sector_size = 0x800
 
     original_sectors = (original_length + sector_size - 1) // sector_size
     packed_sectors = (packed_length + sector_size - 1) // sector_size
     sector_diff = original_sectors - packed_sectors
-
+    # Information on whether will need to change the TOC and Kods efficiency
     if sector_diff > 0:
         print(f'SECTOR SIZE CHANGED! Saved {sector_diff} sectors ({sector_diff * 2 // 1024} bytes)')
     elif sector_diff < 0:
@@ -216,17 +217,17 @@ def start_kods_unpacking(kods_path: Path, output_path: Path) -> None:
     if raw_kods[:4] != b'Kods':
         raise ValueError('Header mismatch')
     # Perform unpacking
-    params = parse_header(raw_kods)
+    params = _parse_header(raw_kods)
     print(params)
 
-    offsets = get_offsets(raw_kods, params)
-    extract_kods(raw_kods, output_path, kods_path.stem, params, offsets)
+    offsets = _get_offsets(raw_kods, params)
+    _extract_kods(raw_kods, output_path, kods_path.stem, params, offsets)
 
 
 
 
-def get_offsets(raw_kods: bytes, params: dict) -> list[int]:
-    if params['extended_table']:
+def _get_offsets(raw_kods: bytes, params: dict) -> list[int]:
+    if params['extended_table']: # Get size of table
         table_size = params['table_base'] + (params['num_offsets'] * params['alignment'] * 2)
     else:
         table_size = params['table_base'] + (params['num_offsets'] * params['alignment'])
@@ -247,7 +248,7 @@ def get_offsets(raw_kods: bytes, params: dict) -> list[int]:
     return offsets
 
 
-def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dict, offsets: list[int]) -> None:
+def _extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dict, offsets: list[int]) -> None:
     output_path.mkdir(parents=True, exist_ok=True)
     extracted = 0
     seen = {} # map (start, end) to filename to detect duplicates
@@ -255,7 +256,6 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
     for i in range(len(offsets) - 1):
         start = offsets[i]
         if start == -1: continue # Skip Nulls
-        
         # The 'end' is the next valid offset, but limited by the EOF marker (offsets[-1])
         end = -1
         for j in range(i + 1, len(offsets)):
@@ -264,19 +264,18 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
                 break
         
         if end == -1 or start >= end: continue
-
         # Deduplication check for extraction
         if (start, end) in seen:
             print(f"  Alias Found: {i:04X} points to same data as {seen[(start, end)]}")
             continue
-        
+        # Save Entry
         segment = raw_kods[start:end]
         if segment.strip(b'\x00'):
             out_name = f'{kods_name}_{i:04X}.bin'
             (output_path / out_name).write_bytes(segment)
             seen[(start, end)] = out_name
             extracted += 1
-
+    # Save any post Kods archive data as XXXX_tail.bin
     last_offset = offsets[-1]
     if last_offset < len(raw_kods):
         tail = raw_kods[last_offset:]
@@ -289,14 +288,14 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
     
 ###------------------------ Utility ---------------------------###
 
-def parse_header(raw_kods: bytes) -> dict[str,Any]:
+def _parse_header(raw_kods: bytes) -> dict[str,Any]:
     header = struct.unpack_from('<I', raw_kods, 4)[0]
     entry_type = (header >> 20) & 0x3
     if entry_type not in (0,1):
         raise ValueError(f'Unsupported entry_type:{entry_type}')
     if (header >> 31) & 1:
         print('WARNING: Runtime flag set, offsets might be runtime RAM pointers.')
-
+    # scan header bits for associated information
     return {
             'num_offsets': header & 0xFFFF,
             'shift': (header >> 16) & 0xF,
