@@ -2,8 +2,7 @@ import struct
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
-
-# TODO external payload research/support
+from Components.Iso import HEADERS
 
 ###---------------------------- Packing ----------------------------###
 
@@ -36,6 +35,7 @@ def start_kods_packing(input_dir: Path, output_path: Path, original_kods: Path) 
     # The packing and reporting
     packed_length = _pack_kods(output_path, kods_header, best_params, final_blocks, offsets, extended_raw, raw_tail)
     _report_sectors(original_length, packed_length)
+    print('Final Parameters:',best_params)
 
 
 def _prepare_data_blocks(input_dir: Path, num_entries: int) -> list:
@@ -123,7 +123,7 @@ def _create_kods_header(params: dict) -> int:
             ((params['shift'] & 0xF) << 16) | 
             ((params['entry_type'] & 0x3) << 20) | 
             (int(params['extended_table']) << 29) | 
-            (0 << 30) | # TODO potential external payload flag
+            (0 << 30) |
             (0 << 31) # runtime flag
         )
     return kods_header
@@ -172,8 +172,6 @@ def _pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: l
             to_write = extended_raw[:expected] + b"\x00" * (expected - len(extended_raw))
             f.write(to_write[:expected])
             print(f"Preserved extended table from original ({expected} bytes)")
-    
-        # TODO External payload output
 
         f.write(b'\x00' * params['padding'])
         for block in data_blocks:
@@ -210,7 +208,7 @@ def _report_sectors(original_length: int, packed_length: int) -> None:
 
 ###---------------------------- Unpack -----------------------------###
 
-def start_kods_unpacking(kods_path: Path, output_path: Path) -> None:
+def start_kods_unpacking(kods_path: Path, output_path: Path) -> dict:
     # Check inputs
     with open(kods_path, 'rb') as f:
         raw_kods = f.read()
@@ -218,12 +216,13 @@ def start_kods_unpacking(kods_path: Path, output_path: Path) -> None:
         raise ValueError('Header mismatch')
     # Perform unpacking
     params = _parse_header(raw_kods)
-    print(params)
-
     offsets = _get_offsets(raw_kods, params)
-    _extract_kods(raw_kods, output_path, kods_path.stem, params, offsets)
+    stats = extract_kods(raw_kods, output_path, kods_path.stem, params, offsets)
 
+    if params['runtime_flag']:
+        stats["runtime_warning"] = "WARNING: Runtime flag set, offsets might be runtime RAM pointers."
 
+    return stats
 
 
 def _get_offsets(raw_kods: bytes, params: dict) -> list[int]:
@@ -248,15 +247,17 @@ def _get_offsets(raw_kods: bytes, params: dict) -> list[int]:
     return offsets
 
 
-def _extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dict, offsets: list[int]) -> None:
+def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dict, offsets: list[int]) -> dict:
     output_path.mkdir(parents=True, exist_ok=True)
     extracted = 0
-    seen = {} # map (start, end) to filename to detect duplicates
+    aliases_skipped = 0
+    seen = {} # map (start, end) to filename
+    tail_info = None
 
     for i in range(len(offsets) - 1):
         start = offsets[i]
         if start == -1: continue # Skip Nulls
-        # The 'end' is the next valid offset, but limited by the EOF marker (offsets[-1])
+        # Find next valid end
         end = -1
         for j in range(i + 1, len(offsets)):
             if offsets[j] != -1:
@@ -264,14 +265,18 @@ def _extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: di
                 break
         
         if end == -1 or start >= end: continue
-        # Deduplication check for extraction
+        # Deduplication
         if (start, end) in seen:
-            print(f"  Alias Found: {i:04X} points to same data as {seen[(start, end)]}")
+            aliases_skipped += 1
             continue
         # Save Entry
         segment = raw_kods[start:end]
         if segment.strip(b'\x00'):
-            out_name = f'{kods_name}_{i:04X}.bin'
+            for magic, suffix in sorted(HEADERS.items(), key=lambda x: -len(x[0])):
+                if segment.startswith(magic): # scan matching header largest to smallest
+                    ext = suffix
+                    break
+            out_name = f'{kods_name}_{i:04X}.{ext}'
             (output_path / out_name).write_bytes(segment)
             seen[(start, end)] = out_name
             extracted += 1
@@ -280,12 +285,20 @@ def _extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: di
     if last_offset < len(raw_kods):
         tail = raw_kods[last_offset:]
         if tail.strip(b'\x00'):
-            tail_path = output_path / f'{kods_name}_tail.bin'
+            for magic, suffix in sorted(HEADERS.items(), key=lambda x: -len(x[0])):
+                if segment.startswith(magic): # scan matching header largest to smallest
+                    ext = suffix
+                    break
+            tail_path = output_path / f'{kods_name}_tail.{ext}'
             tail_path.write_bytes(tail)
-            print(f"  Tail extracted → {tail_path.name} ({len(tail)} bytes)")
+            tail_info = f'{tail_path.name} ({len(tail)} bytes)'
 
-    print(f"Finished — {extracted} unique files extracted.")    
-    
+    return {
+        "extracted": extracted,
+        "aliases_skipped": aliases_skipped,
+        "tail": tail_info,
+    }  
+  
 ###------------------------ Utility ---------------------------###
 
 def _parse_header(raw_kods: bytes) -> dict[str,Any]:
@@ -293,9 +306,7 @@ def _parse_header(raw_kods: bytes) -> dict[str,Any]:
     entry_type = (header >> 20) & 0x3
     if entry_type not in (0,1):
         raise ValueError(f'Unsupported entry_type:{entry_type}')
-    if (header >> 31) & 1:
-        print('WARNING: Runtime flag set, offsets might be runtime RAM pointers.')
-    # scan header bits for associated information
+    
     return {
             'num_offsets': header & 0xFFFF,
             'shift': (header >> 16) & 0xF,
