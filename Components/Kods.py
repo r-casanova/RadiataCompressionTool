@@ -281,7 +281,7 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
             seen[(start, end)] = out_name
             extracted += 1
     # Save any post Kods archive data as XXXX_tail.bin
-    last_offset = offsets[-1]
+    last_offset = max(offsets)
     if last_offset < len(raw_kods):
         tail = raw_kods[last_offset:]
         if tail.strip(b'\x00'):
