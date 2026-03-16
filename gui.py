@@ -434,112 +434,6 @@ def launch_gui():
               bg="#C0C0C0", activebackground="#00FF00", font=("Courier New", 12, "bold"), height=2)
     decomp_btn.pack(fill="x")
 
-    # ====================== EXTRACT KODS TAB ======================
-    kods_ext_tab = ttk.Frame(notebook)
-    notebook.add(kods_ext_tab, text=" EXTRACT KODS ")
-
-    create_retro_header(kods_ext_tab, "   KODS ARCHIVE UNPACKER v1.0   ")
-
-    ttk.Label(kods_ext_tab, text="Input .KODS Files:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(5, 2))
-
-    kods_listbox = tk.Listbox(kods_ext_tab, selectmode="extended", height=10,
-                                bg="#FFFFFF", fg="#000000", font=("Courier New", 10), relief="sunken", bd=3)
-    kods_listbox.pack(fill="both", expand=True, padx=12, pady=5)
-
-    k_btn_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
-    k_btn_frame.pack(fill="x", padx=12, pady=6)
-
-    def add_kods_files():
-        files = filedialog.askopenfilenames(title="Select .kods Files", filetypes=[("KODS Archives", "*.kods"), ("All", "*.*")])
-        for f in files:
-            if f not in kods_listbox.get(0, "end"):
-                kods_listbox.insert("end", f)
-
-    tk.Button(k_btn_frame, text="➕ Add Files", command=add_kods_files, relief="raised", bd=3,
-              bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
-    tk.Button(k_btn_frame, text="🗑 Remove Selected", command=lambda: [kods_listbox.delete(i) for i in reversed(kods_listbox.curselection())],
-              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
-    tk.Button(k_btn_frame, text="Clear All", command=lambda: kods_listbox.delete(0, "end"), relief="raised", bd=3,
-              bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
-
-    ttk.Label(kods_ext_tab, text="Output Directory:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(12, 2))
-
-    kods_out_var = tk.StringVar()
-    kods_out_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
-    kods_out_frame.pack(fill="x", padx=12)
-
-    tk.Entry(kods_out_frame, textvariable=kods_out_var, font=("Courier New", 10), relief="sunken", bd=3).pack(side="left", fill="x", expand=True, padx=(0, 8))
-    tk.Button(kods_out_frame, text="Browse Folder", command=lambda: kods_out_var.set(filedialog.askdirectory() or kods_out_var.get()),
-              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left")
-
-    ttk.Label(kods_ext_tab, text="Live Progress:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(8,2))
-    kods_status = tk.StringVar(value="Idle - Ready to unpack .kods archives")
-    tk.Label(kods_ext_tab, textvariable=kods_status, font=("Courier New", 10), bg="#C0C0C0", fg="#006400",
-             relief="sunken", bd=2, anchor="w", padx=8).pack(fill="x", padx=12, pady=2)
-
-    kods_progress = ttk.Progressbar(kods_ext_tab, length=720, mode='determinate')
-    kods_progress.pack(fill="x", padx=12, pady=4)
-
-    _kods_ext_progress = {"percent": 0, "msg": "", "done": False, "error": None, "log": []}
-
-    def run_kods_extract():
-        files = list(kods_listbox.get(0, "end"))
-        if not files:
-            messagebox.showerror("Error", "Add at least one .kods file")
-            return
-        out_dir = kods_out_var.get().strip()
-        if not out_dir:
-            messagebox.showerror("Error", "Select an output directory")
-            return
-
-        kods_progress.configure(value=0)
-        kods_status.set("Starting unpacking...")
-        kods_ext_btn.configure(state="disabled")
-
-        _kods_ext_progress.update({"percent": 0, "msg": "Unpacking...", "done": False, "error": None, "log": []})
-
-        def thread_target():
-            try:
-                total = len(files)
-                for i, f in enumerate(files):
-                    path = Path(f)
-                    _kods_ext_progress["msg"] = f"Unpacking {path.name}..."
-                    _kods_ext_progress["log"].append(f"Starting {path.name}")
-                    
-                    # Create a subfolder for each archive to prevent spilling
-                    out_path = Path(out_dir) / path.stem
-                    start_kods_unpacking(path, out_path)
-                    
-                    _kods_ext_progress["percent"] = int(((i + 1) / total) * 100)
-                
-                _kods_ext_progress["msg"] = "All Kods extracted!"
-                _kods_ext_progress["done"] = True
-            except Exception as e:
-                _kods_ext_progress["error"] = str(e)
-                _kods_ext_progress["done"] = True
-
-        def poll_progress():
-            kods_progress.configure(value=_kods_ext_progress["percent"])
-            kods_status.set(_kods_ext_progress["msg"])
-            if _kods_ext_progress["done"]:
-                kods_ext_btn.configure(state="normal")
-                if _kods_ext_progress["error"]:
-                    messagebox.showerror("Error", _kods_ext_progress["error"])
-                else:
-                    show_completion_dialog("UNPACKING COMPLETE", "\n".join(_kods_ext_progress["log"]) or "Successfully unpacked all archives.")
-            else:
-                root.after(100, poll_progress)
-
-        threading.Thread(target=thread_target, daemon=True).start()
-        root.after(100, poll_progress)
-
-    kods_ext_btn_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
-    kods_ext_btn_frame.pack(side="bottom", fill="x", padx=12, pady=12)
-
-    kods_ext_btn = tk.Button(kods_ext_btn_frame, text="START UNPACKING", command=run_kods_extract, relief="raised", bd=5,
-              bg="#C0C0C0", activebackground="#00FF00", font=("Courier New", 12, "bold"), height=2)
-    kods_ext_btn.pack(fill="x")
-
     # ====================== PACK KODS TAB ======================
     kods_pack_tab = ttk.Frame(notebook)
     notebook.add(kods_pack_tab, text=" PACK KODS ")
@@ -627,6 +521,160 @@ def launch_gui():
     kods_pack_btn = tk.Button(kods_pack_btn_frame, text="BUILD ARCHIVE", command=run_kods_pack, relief="raised", bd=5,
               bg="#C0C0C0", activebackground="#000080", font=("Courier New", 12, "bold"), height=2)
     kods_pack_btn.pack(fill="x")
+
+    # ====================== EXTRACT KODS TAB ======================
+    kods_ext_tab = ttk.Frame(notebook)
+    notebook.add(kods_ext_tab, text=" EXTRACT KODS ")
+
+    create_retro_header(kods_ext_tab, "   KODS ARCHIVE UNPACKER v1.0   ")
+
+    ttk.Label(kods_ext_tab, text="Input .KODS Files:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(5, 2))
+
+    kods_listbox = tk.Listbox(kods_ext_tab, selectmode="extended", height=10,
+                                bg="#FFFFFF", fg="#000000", font=("Courier New", 10), relief="sunken", bd=3)
+    kods_listbox.pack(fill="both", expand=True, padx=12, pady=5)
+
+    k_btn_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
+    k_btn_frame.pack(fill="x", padx=12, pady=6)
+
+    def add_kods_files():
+        files = filedialog.askopenfilenames(title="Select .kods Files", filetypes=[("KODS Archives", "*.kods"), ("All", "*.*")])
+        for f in files:
+            if f not in kods_listbox.get(0, "end"):
+                kods_listbox.insert("end", f)
+
+    tk.Button(k_btn_frame, text="➕ Add Files", command=add_kods_files, relief="raised", bd=3,
+              bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
+    tk.Button(k_btn_frame, text="🗑 Remove Selected", command=lambda: [kods_listbox.delete(i) for i in reversed(kods_listbox.curselection())],
+              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
+    tk.Button(k_btn_frame, text="Clear All", command=lambda: kods_listbox.delete(0, "end"), relief="raised", bd=3,
+              bg="#C0C0C0", font=("Courier New", 10)).pack(side="left", padx=4)
+
+    ttk.Label(kods_ext_tab, text="Output Directory:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(12, 2))
+
+    kods_out_var = tk.StringVar()
+    kods_out_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
+    kods_out_frame.pack(fill="x", padx=12)
+
+    tk.Entry(kods_out_frame, textvariable=kods_out_var, font=("Courier New", 10), relief="sunken", bd=3).pack(side="left", fill="x", expand=True, padx=(0, 8))
+    tk.Button(kods_out_frame, text="Browse Folder", command=lambda: kods_out_var.set(filedialog.askdirectory() or kods_out_var.get()),
+              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left")
+
+    ttk.Label(kods_ext_tab, text="Live Progress:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(8,2))
+    kods_status = tk.StringVar(value="Idle - Ready to unpack .kods archives")
+    tk.Label(kods_ext_tab, textvariable=kods_status, font=("Courier New", 10), bg="#C0C0C0", fg="#006400",
+             relief="sunken", bd=2, anchor="w", padx=8).pack(fill="x", padx=12, pady=2)
+
+    kods_progress = ttk.Progressbar(kods_ext_tab, length=720, mode='determinate')
+    kods_progress.pack(fill="x", padx=12, pady=4)
+
+    _kods_ext_progress = {"percent": 0, "msg": "", "done": False, "error": None, "log": []}
+
+    def run_kods_extract():
+        files = list(kods_listbox.get(0, "end"))
+        if not files:
+            messagebox.showerror("Error", "Add at least one .kods file")
+            return
+        out_dir = kods_out_var.get().strip()
+        if not out_dir:
+            messagebox.showerror("Error", "Select an output directory")
+            return
+
+        kods_progress.configure(value=0)
+        kods_status.set("Starting unpacking...")
+        kods_ext_btn.configure(state="disabled")
+
+        _kods_ext_progress.update({
+            "percent": 0,
+            "msg": "Unpacking...",
+            "done": False,
+            "error": None,
+            "log": [],
+            "time_taken": 0.0,
+            "total_extracted": 0,
+            "total_aliases": 0
+        })
+
+        def thread_target():
+            try:
+                import time
+                start_time = time.time()
+                total_archives = len(files)
+                total_extracted = 0
+                total_aliases = 0
+
+                for i, f in enumerate(files):
+                    path = Path(f)
+                    _kods_ext_progress["msg"] = f"Unpacking {path.name}..."
+                    _kods_ext_progress["log"].append(f"▶ Starting {path.name}")
+
+                    out_path = Path(out_dir) / path.stem
+
+                    stats = start_kods_unpacking(path, out_path)
+
+                    total_extracted += stats["extracted"]
+                    total_aliases += stats.get("aliases_skipped", 0)
+
+                    _kods_ext_progress["log"].append(
+                        f"✓ Finished {path.name} → {stats['extracted']} unique files extracted"
+                    )
+                    if stats.get("aliases_skipped"):
+                        _kods_ext_progress["log"].append(
+                            f"  {stats['aliases_skipped']} aliases skipped (duplicates)"
+                        )
+                    if stats.get("tail"):
+                        _kods_ext_progress["log"].append(f"  Tail: {stats['tail']}")
+                    if stats.get("runtime_warning"):
+                        _kods_ext_progress["log"].append(f"  {stats['runtime_warning']}")
+
+                    _kods_ext_progress["percent"] = int(((i + 1) / total_archives) * 100)
+
+                # Final stats
+                time_taken = round(time.time() - start_time, 2)
+                _kods_ext_progress.update({
+                    "time_taken": time_taken,
+                    "total_extracted": total_extracted,
+                    "total_aliases": total_aliases,
+                    "msg": f"All {total_archives} archives unpacked! ({total_extracted} files total)",
+                    "done": True
+                })
+
+            except Exception as e:
+                _kods_ext_progress["error"] = str(e)
+                _kods_ext_progress["done"] = True
+
+        def poll_progress():
+            kods_progress.configure(value=_kods_ext_progress["percent"])
+            kods_status.set(_kods_ext_progress["msg"])
+
+            if _kods_ext_progress["done"]:
+                kods_ext_btn.configure(state="normal")
+                if _kods_ext_progress["error"]:
+                    messagebox.showerror("Error", _kods_ext_progress["error"])
+                else:
+                    # === FULL STATS DIALOG AFTER EVERYTHING IS DONE ===
+                    summary = f"UNPACKING COMPLETE\n\n"
+                    summary += f"Archives processed      : {len(files)}\n"
+                    summary += f"Total unique files      : {_kods_ext_progress['total_extracted']}\n"
+                    summary += f"Total aliases skipped   : {_kods_ext_progress['total_aliases']}\n"
+                    summary += f"Total time taken        : {_kods_ext_progress['time_taken']} seconds\n"
+                    summary += f"Output folder           : {out_dir}\n\n"
+                    summary += "─── Detailed log ───\n"
+                    summary += "\n".join(_kods_ext_progress["log"])
+
+                    show_completion_dialog("UNPACKING COMPLETE", summary)
+            else:
+                root.after(100, poll_progress)
+
+        threading.Thread(target=thread_target, daemon=True).start()
+        root.after(100, poll_progress)
+
+    kods_ext_btn_frame = tk.Frame(kods_ext_tab, bg="#C0C0C0")
+    kods_ext_btn_frame.pack(side="bottom", fill="x", padx=12, pady=12)
+
+    kods_ext_btn = tk.Button(kods_ext_btn_frame, text="START UNPACKING", command=run_kods_extract, relief="raised", bd=5,
+              bg="#C0C0C0", activebackground="#00FF00", font=("Courier New", 12, "bold"), height=2)
+    kods_ext_btn.pack(fill="x")
 
     root.mainloop()
 
