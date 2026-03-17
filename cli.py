@@ -1,9 +1,11 @@
 import argparse
+import json
 from pathlib import Path
 
 from Components.Compressor import MODE_DISPLAY, start_compression, start_decompression, COMPRESSION_MODES
 from Components.Kods import start_kods_packing, start_kods_unpacking
-from Components.Iso import unpack_iso
+from Components.Iso import unpack_iso, pack_iso
+from Components.iso_names import generate_name_overrides
 
 ###------------------------- MAIN -----------------------------###
 
@@ -54,6 +56,15 @@ if __name__ == "__main__":
     extract_iso = iso_sub.add_parser('extract', help='Extract ISO archive')
     extract_iso.add_argument('input', metavar='INPUT', help='ISO to extract')
     extract_iso.add_argument('output', metavar='OUTPUT', help='Output directory')
+    extract_iso.add_argument('--no-names', action='store_true', default=False,
+                             help='Disable semantic file naming (plain index-only filenames)')
+    extract_iso.add_argument('--names', metavar='PATH', default=None,
+                             help='Path to custom override JSON (built-in labels used by default)')
+
+    pack_iso_cmd = iso_sub.add_parser('pack', help='Repack ISO from extracted directory')
+    pack_iso_cmd.add_argument('input', metavar='INPUT', help='Extracted directory (with toc_metadata.json)')
+    pack_iso_cmd.add_argument('output', metavar='OUTPUT', help='Output ISO path')
+    pack_iso_cmd.add_argument('original', metavar='ORIGINAL', help='Original ISO to use as template')
 
     # arg parsing execution
     args = parser.parse_args()
@@ -111,6 +122,17 @@ if __name__ == "__main__":
 
     elif args.command == 'iso': # Extract Iso
         if args.iso_command == 'extract':
-            unpack_iso(Path(args.input), Path(args.output))
+            if args.no_names:
+                name_overrides = None
+            elif args.names:
+                with open(args.names) as nf:
+                    raw = json.load(nf)
+                name_overrides = {int(k): v for k, v in raw.items()}
+            else:
+                name_overrides = generate_name_overrides()
+            unpack_iso(Path(args.input), Path(args.output), name_overrides=name_overrides)
+        elif args.iso_command == 'pack':
+            print('Starting ISO packing')
+            pack_iso(Path(args.input), Path(args.output), Path(args.original))
 
     print('\nDone')

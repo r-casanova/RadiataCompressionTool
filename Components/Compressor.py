@@ -514,10 +514,10 @@ def lzss_decompress(data: bytes, compressed_payload_length: int) -> bytes:
                 else:
                     target = len(decompressed) - offset
                     for k in range(length):
-                        if target + k < 0: # terminate on offset = 0
-                            break
+                        if target + k < 0:
+                            decompressed.append(0x00)  # ring buffer zero-init
                         else:
-                            decompressed.append(decompressed[target + k ])
+                            decompressed.append(decompressed[target + k])
         if len(decompressed) >= expected_size: # flush extra flags
             decompressed = decompressed[:expected_size]
             break
@@ -566,7 +566,6 @@ def load_file(filename: str, min_size = 0x10, max_size = 0x1000000) -> bytes:
 
 
 def save_files(files: list, basename: str, log_func=None) -> None:
-    print('here')
     for i, item in enumerate(files, start=1):
         ext = '.bin'
         for magic, suffix in sorted(HEADERS.items(), key=lambda x: -len(x[0])):
@@ -575,7 +574,7 @@ def save_files(files: list, basename: str, log_func=None) -> None:
                 break
 
         if len(files)>1:
-            outname = f'{basename}{ext}{i}'
+            outname = f'{basename}_{i}{ext}'
         else:
             outname = f'{basename}{ext}'
         with open(outname, "wb") as f:
