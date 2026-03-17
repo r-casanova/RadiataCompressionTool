@@ -1,4 +1,5 @@
 import struct
+import json
 import re
 from pathlib import Path
 from typing import Any, Optional, Tuple
@@ -19,6 +20,10 @@ def start_kods_packing(input_dir: Path, output_path: Path, original_kods: Path) 
     # Determine original parameters
     params = _parse_header(raw_original)
     original_length = len(raw_original)
+    # Check if original's last offset entry is sentinel
+    last_pos = params['table_base'] + ((params['num_offsets'] - 1) * params['alignment'])
+    last_raw = struct.unpack_from(params['format'], raw_original, last_pos)[0]
+    last_is_sentinel = (last_raw == params['sentinel'])
     # Extended table based on original to keep metadata and files contiguous
     extended_raw: Optional[bytes] = None
     if params['extended_table']:
@@ -28,12 +33,13 @@ def start_kods_packing(input_dir: Path, output_path: Path, original_kods: Path) 
         print(f"Template from original: {params['num_offsets']} slots + extended table ({ext_size} bytes)")
     # Information needed for a successful packing
     data_blocks = _prepare_data_blocks(input_dir, params['num_offsets'] - 1)
+    aliases = _load_aliases(input_dir)
     raw_tail = _load_tail(input_dir)
     best_params = _analyze_kods_outcomes(data_blocks, params)
     kods_header = _create_kods_header(best_params)
-    offsets, final_blocks = _calculate_offsets(data_blocks, best_params)
+    offsets, final_blocks = _calculate_offsets(data_blocks, best_params, aliases, last_is_sentinel)
     # The packing and reporting
-    packed_length = _pack_kods(output_path, kods_header, best_params, final_blocks, offsets, extended_raw, raw_tail)
+    packed_length = _pack_kods(output_path, kods_header, best_params, final_blocks, offsets, extended_raw, raw_tail, original_length)
     _report_sectors(original_length, packed_length)
     print('Final Parameters:',best_params)
 
@@ -41,20 +47,20 @@ def start_kods_packing(input_dir: Path, output_path: Path, original_kods: Path) 
 def _prepare_data_blocks(input_dir: Path, num_entries: int) -> list:
     # Gather bins for rebuild into an organised list
     file_map: dict[int, bytes] = {}
-    pattern = re.compile(r'_([0-9A-Fa-f]{4})\.bin$', re.IGNORECASE)
-    for p in input_dir.glob("*.bin"):
+    pattern = re.compile(r'_([0-9A-Fa-f]{4})\.\w+$', re.IGNORECASE)
+    for p in input_dir.iterdir():
         m = pattern.search(p.name)
         if m:
             idx = int(m.group(1), 16)
             if idx < num_entries:
                 file_map[idx] = p.read_bytes()
 
-    return [file_map.get(i, b'') for i in range(num_entries)]
+    return [file_map.get(i, None) for i in range(num_entries)]
 
 
 def _load_tail(input_dir: Path):
     # Check for XXXX_tail.bin file
-    tail_file = list(input_dir.glob('*_tail.bin'))
+    tail_file = list(input_dir.glob('*_tail.*'))
     if tail_file:
         tail = tail_file[0].read_bytes()
         print(f'Found tail will append: {tail_file[0].name} ({len(tail)} bytes)')
@@ -62,14 +68,22 @@ def _load_tail(input_dir: Path):
     return None
 
 
+def _load_aliases(input_dir: Path) -> dict:
+    aliases_path = input_dir / '_aliases.json'
+    if aliases_path.exists():
+        with open(aliases_path) as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    return {}
+
+
 def _analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str,Any]:
     # Get data
     unique_blocks = {}
     total_unique_size = 0
     for block in data_blocks:
-        if block and block not in unique_blocks:
+        if block is not None and block and block not in unique_blocks:
             unique_blocks[block] = True
-            total_unique_size += len(block)    
+            total_unique_size += len(block)
     # Generate new params based on certain original params to avoid corruption
     num_entries = len(data_blocks) + 1
     entry_type = original_params['entry_type']
@@ -83,18 +97,19 @@ def _analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str
 
     best_parameters = None
     # Find best shift
-    test_shifts = sorted(list(set([original_params['shift'], 2, 4, 11] + list(range(2, 13)))))    
+    test_shifts = sorted(list(set([original_params['shift'], 2, 4, 11] + list(range(2, 13)))))
     for shift in test_shifts:
         denominator = 2 ** shift
-        table_padding = (denominator - (table_size % denominator)) % denominator
+        # No padding between table and data — offsets are relative to table_end
+        table_padding = 0
 
         current_offset = table_padding
         possible = True
         for block in data_blocks:
-            if not block: continue
+            if block is None or not block: continue
             if (current_offset >> shift) >= sentinel:
                 possible = False
-            current_offset += (len(block) + (denominator - 1) & ~(denominator - 1))
+            current_offset += (len(block) + denominator - 1) & ~(denominator - 1)
         if possible:
             best_parameters = {
                 'shift': shift,
@@ -113,53 +128,64 @@ def _analyze_kods_outcomes(data_blocks: list, original_params: dict) -> dict[str
 
     if not best_parameters:
         raise ValueError('Archive data is too large for the required table size!')
-    
+
     return best_parameters
 
 
 def _create_kods_header(params: dict) -> int:
     kods_header = (
-            (params['num_offsets'] & 0xFFFF) | 
-            ((params['shift'] & 0xF) << 16) | 
-            ((params['entry_type'] & 0x3) << 20) | 
-            (int(params['extended_table']) << 29) | 
+            (params['num_offsets'] & 0xFFFF) |
+            ((params['shift'] & 0xF) << 16) |
+            ((params['entry_type'] & 0x3) << 20) |
+            (int(params['extended_table']) << 29) |
             (0 << 30) |
             (0 << 31) # runtime flag
         )
     return kods_header
 
 
-def _calculate_offsets(data_blocks: list[Optional[bytes]], params: dict) -> Tuple[list[int], list[bytes]]:
+def _calculate_offsets(data_blocks: list[Optional[bytes]], params: dict,
+                       aliases: dict = None, last_is_sentinel: bool = False) -> Tuple[list[int], list[bytes]]:
+    aliases = aliases or {}
     pos = params['padding']
     shifted_offsets = []
     final_data_blobs = []
-    hash_map = {}
 
-    for block in data_blocks:
-        if not block: # Handle NULL entries
+    for i, block in enumerate(data_blocks):
+        if i in aliases:
+            shifted_offsets.append(None)  # placeholder, fix up after
+            continue
+        if block is None: # NULL / missing entry
             shifted_offsets.append(params['sentinel'])
             continue
-            
-        block_hash = hash(block)
-        if block_hash in hash_map: 
-            shifted_offsets.append(hash_map[block_hash])
-        else: # new entry
+        if len(block) == 0: # zero-length valid entry (Bug 3 fix)
             shifted_offsets.append(pos >> params['shift'])
-            hash_map[block_hash] = pos >> params['shift']
-            final_data_blobs.append(block)
-            
-            pos += len(block)
-            padding = (params['denominator'] - (pos % params['denominator'])) % params['denominator']
-            pos += padding
-            
-            # Add padding to the block itself to keep the file pointer math simple
-            final_data_blobs[-1] += (b'\x00' * padding)
+            continue
+        # Normal entry — no content dedup (Bug 2 fix)
+        shifted_offsets.append(pos >> params['shift'])
+        final_data_blobs.append(block)
 
-    shifted_offsets.append(pos >> params['shift'])
+        pos += len(block)
+        padding = (params['denominator'] - (pos % params['denominator'])) % params['denominator']
+        pos += padding
+
+        # Add padding to the block itself to keep the file pointer math simple
+        final_data_blobs[-1] += (b'\x00' * padding)
+
+    # Fix up alias offsets to point to their target's offset
+    for alias_idx, target_idx in aliases.items():
+        if alias_idx < len(shifted_offsets):
+            shifted_offsets[alias_idx] = shifted_offsets[target_idx]
+
+    # End marker: sentinel if original had sentinel, otherwise computed end position
+    if last_is_sentinel:
+        shifted_offsets.append(params['sentinel'])
+    else:
+        shifted_offsets.append(pos >> params['shift'])
     return shifted_offsets, final_data_blobs
 
 
-def _pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: list[bytes], offsets: list[int], extended_raw: Optional[bytes], raw_tail: Optional[bytes]) -> int:
+def _pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: list[bytes], offsets: list[int], extended_raw: Optional[bytes], raw_tail: Optional[bytes], original_length: int = 0) -> int:
     out_file = output_path / 'repack.bin'
     with open(out_file, 'wb') as f:
         f.write(b'Kods') # write header
@@ -176,15 +202,20 @@ def _pack_kods(output_path: Path, kods_header: int, params: dict, data_blocks: l
         f.write(b'\x00' * params['padding'])
         for block in data_blocks:
             f.write(block)
-        
+
         if raw_tail: # Append tail after Kods archive
             f.write(raw_tail)
             print(f"Appended tail after data ({len(raw_tail)} bytes)")
 
-        sector_size = 0x800
-        sector_padding = (sector_size - (f.tell() % sector_size)) % sector_size
-        if sector_padding: # Pad to sector size
-            f.write(b'\x00' * sector_padding)
+        # Pad to original size if available, otherwise to sector boundary
+        current = f.tell()
+        if original_length and current < original_length:
+            f.write(b'\x00' * (original_length - current))
+        else:
+            sector_size = 0x800
+            sector_padding = (sector_size - (current % sector_size)) % sector_size
+            if sector_padding:
+                f.write(b'\x00' * sector_padding)
 
     print(f'Repacked .kods to {output_path}.\nStatistics; Number of offsets:{params["num_offsets"]} Entry type:{params["entry_type"]}')
 
@@ -231,6 +262,7 @@ def _get_offsets(raw_kods: bytes, params: dict) -> list[int]:
     else:
         table_size = params['table_base'] + (params['num_offsets'] * params['alignment'])
 
+    params['table_end'] = table_size
     params['null_entries'] = set()
     params['null_count'] = 0
     offsets = []
@@ -241,6 +273,9 @@ def _get_offsets(raw_kods: bytes, params: dict) -> list[int]:
             offsets.append(-1)
             params['null_entries'].add(index)
             params['null_count'] += 1
+        elif raw_offset == 0: # Zero-offset entry (treated as empty per game code)
+            offsets.append(table_size)  # resolves to data region start
+            params['null_entries'].add(index)
         else:
             absolute_offset = table_size + (raw_offset << params['shift'])
             offsets.append(absolute_offset)
@@ -251,45 +286,81 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
     output_path.mkdir(parents=True, exist_ok=True)
     extracted = 0
     aliases_skipped = 0
-    seen = {} # map (start, end) to filename
+    seen = {} # map (start, end) to first entry index
+    aliases = {} # alias_index -> target_index (for round-trip)
     tail_info = None
 
     for i in range(len(offsets) - 1):
         start = offsets[i]
-        if start == -1: continue # Skip Nulls
+        if start == -1: continue # Skip sentinel entries
         # Find next valid end
         end = -1
         for j in range(i + 1, len(offsets)):
             if offsets[j] != -1:
                 end = offsets[j]
                 break
-        
-        if end == -1 or start >= end: continue
-        # Deduplication
+
+        # Bug 1 fix: when no forward end found, compute from file data
+        if end == -1:
+            data_end = len(raw_kods)
+            # Strip trailing null bytes (sector padding)
+            while data_end > start + 1 and raw_kods[data_end - 1] == 0:
+                data_end -= 1
+            if data_end > start:
+                # Re-align to shift boundary relative to data region start
+                denom = 1 << params['shift']
+                table_end = params.get('table_end', start)
+                relative = data_end - table_end
+                aligned = relative + (denom - (relative % denom)) % denom
+                end = table_end + aligned
+                end = min(end, len(raw_kods))
+            else:
+                end = start  # empty
+
+        # Bug 3 fix: write zero-length file for valid zero-length entries
+        if start >= end:
+            ext = '.bin'
+            out_name = f'{kods_name}_{i:04X}{ext}'
+            (output_path / out_name).write_bytes(b'')
+            extracted += 1
+            continue
+
+        # Alias tracking: same (start, end) range = alias
         if (start, end) in seen:
+            aliases[str(i)] = seen[(start, end)]
             aliases_skipped += 1
             continue
+
         # Save Entry
         segment = raw_kods[start:end]
         if segment.strip(b'\x00'):
+            ext = '.bin'
             for magic, suffix in sorted(HEADERS.items(), key=lambda x: -len(x[0])):
                 if segment.startswith(magic): # scan matching header largest to smallest
                     ext = suffix
                     break
-            out_name = f'{kods_name}_{i:04d}.{ext}'
+            out_name = f'{kods_name}_{i:04X}{ext}'
             (output_path / out_name).write_bytes(segment)
-            seen[(start, end)] = out_name
+            seen[(start, end)] = i
             extracted += 1
+
+    # Save aliases map for round-trip repacking
+    if aliases:
+        aliases_path = output_path / '_aliases.json'
+        with open(aliases_path, 'w') as f:
+            json.dump(aliases, f)
+
     # Save any post Kods archive data as XXXX_tail.bin
-    last_offset = max(offsets)
-    if last_offset < len(raw_kods):
+    last_offset = offsets[-1]
+    if last_offset > 0 and last_offset < len(raw_kods):
         tail = raw_kods[last_offset:]
         if tail.strip(b'\x00'):
+            ext = '.bin'
             for magic, suffix in sorted(HEADERS.items(), key=lambda x: -len(x[0])):
-                if segment.startswith(magic): # scan matching header largest to smallest
+                if tail.startswith(magic): # scan matching header largest to smallest
                     ext = suffix
                     break
-            tail_path = output_path / f'{kods_name}_tail.{ext}'
+            tail_path = output_path / f'{kods_name}_tail{ext}'
             tail_path.write_bytes(tail)
             tail_info = f'{tail_path.name} ({len(tail)} bytes)'
 
@@ -297,8 +368,8 @@ def extract_kods(raw_kods: bytes, output_path: Path, kods_name: str, params: dic
         "extracted": extracted,
         "aliases_skipped": aliases_skipped,
         "tail": tail_info,
-    }  
-  
+    }
+
 ###------------------------ Utility ---------------------------###
 
 def _parse_header(raw_kods: bytes) -> dict[str,Any]:
@@ -306,7 +377,7 @@ def _parse_header(raw_kods: bytes) -> dict[str,Any]:
     entry_type = (header >> 20) & 0x3
     if entry_type not in (0,1):
         raise ValueError(f'Unsupported entry_type:{entry_type}')
-    
+
     return {
             'num_offsets': header & 0xFFFF,
             'shift': (header >> 16) & 0xF,
@@ -316,7 +387,6 @@ def _parse_header(raw_kods: bytes) -> dict[str,Any]:
             'runtime_flag': (header >> 31) & 1,
             'alignment': 2 if entry_type else 4,
             'format': '<H' if entry_type else '<I',
-            'sentinel': 0xFFFF if entry_type else 0xFFFFFFFF, 
+            'sentinel': 0xFFFF if entry_type else 0xFFFFFFFF,
             'table_base': 8,
             }
-

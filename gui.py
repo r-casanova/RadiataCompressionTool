@@ -6,7 +6,8 @@ from pathlib import Path
 
 from Components.Compressor import MODE_DISPLAY, start_compression, start_decompression
 from Components.Kods import start_kods_packing, start_kods_unpacking
-from Components.Iso import unpack_iso
+from Components.Iso import unpack_iso, pack_iso
+from Components.iso_names import generate_name_overrides
 
 def launch_gui():
     root = tk.Tk()
@@ -103,6 +104,8 @@ def launch_gui():
     iso_progress = ttk.Progressbar(iso_tab, length=720, mode='determinate')
     iso_progress.pack(fill="x", padx=12, pady=10)
 
+    _iso_unpack = {"percent": 0, "msg": "Ready.", "done": False, "error": None}
+
     def run_iso_unpack():
         iso_file = iso_path_var.get().strip()
         out_dir = iso_out_var.get().strip()
@@ -113,25 +116,42 @@ def launch_gui():
 
         iso_btn.configure(state="disabled")
         iso_progress.configure(value=0)
-        
+        _iso_unpack.update({"percent": 0, "msg": "Accessing LBA 0x3C6C1800...", "done": False, "error": None})
+
         def thread_target():
             try:
-                iso_status.set("Accessing LBA 0x3C6C1800... Unscrambling TOC...")
-                iso_progress.configure(value=15)
-                
-                # Execute your logic
-                unpack_iso(Path(iso_file), Path(out_dir))
-                
-                iso_status.set("Success! 4608 entries processed.")
-                iso_progress.configure(value=100)
-                messagebox.showinfo("Complete", "ISO contents extracted successfully.")
+                _iso_unpack["percent"] = 5
+                _iso_unpack["msg"] = "Unscrambling TOC..."
+
+                def on_progress(current, total):
+                    pct = 10 + int((current / total) * 85)
+                    _iso_unpack["percent"] = pct
+                    _iso_unpack["msg"] = f"Extracting {current}/{total}..."
+
+                unpack_iso(Path(iso_file), Path(out_dir),
+                           progress_callback=on_progress,
+                           name_overrides=generate_name_overrides())
+                _iso_unpack["percent"] = 100
+                _iso_unpack["msg"] = "Success! Extraction complete."
+                _iso_unpack["done"] = True
             except Exception as e:
-                iso_status.set(f"CRITICAL ERROR: {str(e)[:50]}")
-                messagebox.showerror("ISO Error", str(e))
-            finally:
+                _iso_unpack["error"] = str(e)
+                _iso_unpack["done"] = True
+
+        def poll():
+            iso_progress.configure(value=_iso_unpack["percent"])
+            iso_status.set(_iso_unpack["msg"])
+            if _iso_unpack["done"]:
                 iso_btn.configure(state="normal")
+                if _iso_unpack["error"]:
+                    messagebox.showerror("ISO Error", _iso_unpack["error"])
+                else:
+                    messagebox.showinfo("Complete", "ISO contents extracted successfully.")
+            else:
+                root.after(100, poll)
 
         threading.Thread(target=thread_target, daemon=True).start()
+        root.after(100, poll)
 
     iso_btn_frame = tk.Frame(iso_tab, bg="#C0C0C0")
     iso_btn_frame.pack(side="bottom", fill="x", padx=12, pady=12)
@@ -139,6 +159,102 @@ def launch_gui():
                         relief="raised", bd=5, bg="#C0C0C0", activebackground="#000080",
                         font=("Courier New", 12, "bold"), height=2)
     iso_btn.pack(fill="x")
+
+    # ====================== REPACK ISO TAB ======================
+    repack_tab = ttk.Frame(notebook)
+    notebook.add(repack_tab, text=" REPACK ISO ")
+
+    create_retro_header(repack_tab, "   RADIATA ISO REPACKER v1.0   ")
+
+    ttk.Label(repack_tab, text="Extracted Directory (contains toc_metadata.json):", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(10, 2))
+
+    repack_input_frame = tk.Frame(repack_tab, bg="#C0C0C0")
+    repack_input_frame.pack(fill="x", padx=12)
+    repack_dir_var = tk.StringVar()
+    tk.Entry(repack_input_frame, textvariable=repack_dir_var, font=("Courier New", 10), relief="sunken", bd=3).pack(side="left", fill="x", expand=True, padx=(0, 8))
+    tk.Button(repack_input_frame, text="Browse Folder", command=lambda: repack_dir_var.set(filedialog.askdirectory() or repack_dir_var.get()),
+              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left")
+
+    ttk.Label(repack_tab, text="Original ISO (Template):", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(15, 2))
+
+    repack_orig_frame = tk.Frame(repack_tab, bg="#C0C0C0")
+    repack_orig_frame.pack(fill="x", padx=12)
+    repack_orig_var = tk.StringVar()
+    tk.Entry(repack_orig_frame, textvariable=repack_orig_var, font=("Courier New", 10), relief="sunken", bd=3).pack(side="left", fill="x", expand=True, padx=(0, 8))
+    tk.Button(repack_orig_frame, text="Browse...", command=lambda: repack_orig_var.set(filedialog.askopenfilename(filetypes=[("ISO Files", "*.iso"), ("All", "*.*")]) or repack_orig_var.get()),
+              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left")
+
+    ttk.Label(repack_tab, text="Output ISO:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(15, 2))
+
+    repack_out_frame = tk.Frame(repack_tab, bg="#C0C0C0")
+    repack_out_frame.pack(fill="x", padx=12)
+    repack_out_var = tk.StringVar()
+    tk.Entry(repack_out_frame, textvariable=repack_out_var, font=("Courier New", 10), relief="sunken", bd=3).pack(side="left", fill="x", expand=True, padx=(0, 8))
+    tk.Button(repack_out_frame, text="Browse...", command=lambda: repack_out_var.set(filedialog.asksaveasfilename(defaultextension=".iso", filetypes=[("ISO Files", "*.iso"), ("All", "*.*")]) or repack_out_var.get()),
+              relief="raised", bd=3, bg="#C0C0C0", font=("Courier New", 10)).pack(side="left")
+
+    ttk.Label(repack_tab, text="Terminal Output:", font=("Courier New", 10, "bold"), background="#C0C0C0").pack(anchor="w", padx=12, pady=(20, 2))
+    repack_status = tk.StringVar(value="Ready. Select paths to begin.")
+    tk.Label(repack_tab, textvariable=repack_status, font=("Courier New", 10), bg="#001100", fg="#00FF80",
+             relief="sunken", bd=3, anchor="w", padx=8, height=2).pack(fill="x", padx=12, pady=2)
+
+    repack_progress = ttk.Progressbar(repack_tab, length=720, mode='determinate')
+    repack_progress.pack(fill="x", padx=12, pady=10)
+
+    _iso_repack = {"percent": 0, "msg": "Ready.", "done": False, "error": None}
+
+    def run_iso_repack():
+        ext_dir = repack_dir_var.get().strip()
+        orig_iso = repack_orig_var.get().strip()
+        out_iso = repack_out_var.get().strip()
+
+        if not ext_dir or not orig_iso or not out_iso:
+            messagebox.showerror("Error", "All three paths are required.")
+            return
+
+        repack_btn.configure(state="disabled")
+        repack_progress.configure(value=0)
+        _iso_repack.update({"percent": 0, "msg": "Copying original ISO as template...", "done": False, "error": None})
+
+        def thread_target():
+            try:
+                _iso_repack["percent"] = 5
+                _iso_repack["msg"] = "Copying original ISO as template..."
+
+                def on_progress(current, total):
+                    pct = 10 + int((current / total) * 85)
+                    _iso_repack["percent"] = pct
+                    _iso_repack["msg"] = f"Writing {current}/{total}..."
+
+                pack_iso(Path(ext_dir), Path(out_iso), Path(orig_iso), progress_callback=on_progress)
+                _iso_repack["percent"] = 100
+                _iso_repack["msg"] = "Success! ISO repacked."
+                _iso_repack["done"] = True
+            except Exception as e:
+                _iso_repack["error"] = str(e)
+                _iso_repack["done"] = True
+
+        def poll():
+            repack_progress.configure(value=_iso_repack["percent"])
+            repack_status.set(_iso_repack["msg"])
+            if _iso_repack["done"]:
+                repack_btn.configure(state="normal")
+                if _iso_repack["error"]:
+                    messagebox.showerror("Repack Error", _iso_repack["error"])
+                else:
+                    messagebox.showinfo("Complete", f"Repacked ISO written to:\n{out_iso}")
+            else:
+                root.after(100, poll)
+
+        threading.Thread(target=thread_target, daemon=True).start()
+        root.after(100, poll)
+
+    repack_btn_frame = tk.Frame(repack_tab, bg="#C0C0C0")
+    repack_btn_frame.pack(side="bottom", fill="x", padx=12, pady=12)
+    repack_btn = tk.Button(repack_btn_frame, text="REPACK ISO", command=run_iso_repack,
+                        relief="raised", bd=5, bg="#C0C0C0", activebackground="#000080",
+                        font=("Courier New", 12, "bold"), height=2)
+    repack_btn.pack(fill="x")
 
     # ====================== COMPRESS TAB ======================
     compress_tab = ttk.Frame(notebook)
